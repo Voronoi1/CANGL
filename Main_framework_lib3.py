@@ -553,7 +553,7 @@ def get_agr(agr_name,server,dataset_name,test_dataset_dict,agr_logger,ifprint=Fa
         return agr_method_dict[agr_name](agr_logger,ifprint=False)
     
     
-def gradient_simulate(dataset_name,dataset_info,target_class,knowledge_level,agr_name,fl_setting,agr_attack_setting_dict,sp=False,model_dataset=None):
+def gradient_simulate(dataset_name,dataset_info,target_class,knowledge_level,agr_name,fl_setting,agr_attack_setting_dict,sp=False,model_dataset=None,initial_global_model_path=None,robust_aggregator=None,malicious_model_path=None,second_submission_fn=None,skip_first_aggregation=False):
     #Config
     batch_size = fl_setting["batch_size"]
     client_num = fl_setting["client_num"]
@@ -602,6 +602,8 @@ def gradient_simulate(dataset_name,dataset_info,target_class,knowledge_level,agr
     
     
     model_path = "./model/"+dataset_name+"_"+knowledge_level+"_"+str(target_class)+"_"+agr_name+"_Poisoning_Model.pth"
+    if initial_global_model_path is not None:
+        model_path = initial_global_model_path
     server.load_model(model_path)
     
     for index,client in enumerate(clients):
@@ -616,10 +618,15 @@ def gradient_simulate(dataset_name,dataset_info,target_class,knowledge_level,agr
     train_loaders += [iter(torch.utils.data.DataLoader(no_target_dataset,batch_size=batch_size,shuffle=False)) for no_target_dataset in no_target_datasets]
     
     target_model_path = "./model/"+dataset_name+"_"+knowledge_level+"_"+str(target_class)+"_Malicious_Model.pth"
+    if malicious_model_path is not None:
+        target_model_path = malicious_model_path
     replacement_state_dict = torch.load(target_model_path)
     
     agr_logger = get_logger("./log/S3/"+dataset_name+"_"+knowledge_level+"_"+str(target_class)+"_"+agr_name+"_Gradient.log", verbosity=1, name=dataset_name+"_"+knowledge_level+"_"+str(target_class)+"_"+agr_name+"_Gradient")
-    agr = get_agr(agr_name,server,dataset_name,test_data_dict,agr_logger,ifprint=False)
+    if robust_aggregator is None:
+        agr = get_agr(agr_name,server,dataset_name,test_data_dict,agr_logger,ifprint=False)
+    else:
+        agr = robust_aggregator
     
     server.set_robust_agg(agr,malicious_num,mal_client_idx=list(range(client_num-malicious_num,client_num)))
     
@@ -631,8 +638,17 @@ def gradient_simulate(dataset_name,dataset_info,target_class,knowledge_level,agr
     
     for e in range(100):
         input = [next(loader) for loader in train_loaders]
-        gradient_list, inference_gradient, previous_global_model_state_dict = fedSGD_batch_gradient_inference_under_AGR(server, clients, input, return_candidx=False)
-        gradient_list, inference_gradient, previous_global_model_state_dict, candidate_indices = fedSGD_replacement_batch_gradient_inference_under_AGR(server, 
+        if skip_first_aggregation:
+            if second_submission_fn is None:
+                raise ValueError(
+                    "second_submission_fn is required when the first aggregation is skipped."
+                )
+            inference_gradient = None
+        else:
+            gradient_list, inference_gradient, previous_global_model_state_dict = fedSGD_batch_gradient_inference_under_AGR(server, clients, input, return_candidx=False)
+        if second_submission_fn is None:
+            second_submission_fn = fedSGD_replacement_batch_gradient_inference_under_AGR
+        gradient_list, inference_gradient, previous_global_model_state_dict, candidate_indices = second_submission_fn(server, 
                                                                                                                                         clients, 
                                                                                                                                         input, 
                                                                                                                                         replacement_state_dict,
